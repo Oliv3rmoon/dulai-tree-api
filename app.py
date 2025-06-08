@@ -187,3 +187,19 @@ async def chat(body: ChatBody):
     """
     Expects: {"message": "<user text>"}
     """
+
+
+    async def gen():
+        async for chunk in stream:
+            choice = chunk.choices[0]
+            if choice.delta and choice.delta.get("function_call"):
+                fc = choice.delta.function_call
+                if fc.name and fc.arguments:
+                    args = json.loads(fc.arguments)
+                    result = FUNC_TABLE[fc.name](**args)
+                    yield json.dumps({"function_result": result}) + "\n"
+            elif choice.delta and choice.delta.get("content") is not None:
+                yield json.dumps({"content": choice.delta.content}) + "\n"
+
+    # 🔧 wrap the generator
+    return StreamingResponse(gen(), media_type="application/json")
