@@ -183,47 +183,41 @@ class ChatBody(BaseModel):
     message: str
 
 
+from fastapi.responses import StreamingResponse
+import logging, json, openai       # openai & json are already imported elsewhere
+
+logging.basicConfig(level=logging.INFO)          # ← keep while debugging
+
 @app.post("/chat")
 async def chat(body: ChatBody):
     """
-    Expects a JSON body: {"message": "<user text>"}
-    Returns a streaming JSON Lines response:
-      {"content": "..."} or {"function_result": {...}}
+    Request:  {"message": "<user text>"}
+    Response: streaming JSON Lines:
+        {"content": "..."}            normal tokens
+        {"function_result": {...}}    after a tool call
     """
 
+    # 1) OpenAI streaming completion  (SYNC iterator)
     stream = openai.chat.completions.create(
-        model        = "gpt-4o",
-        temperature  = 0.4,
-        stream       = True,
-        messages     = [
+        model         = "gpt-4o",
+        temperature   = 0.4,
+        stream        = True,
+        messages      = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": body.message}
         ],
-        functions    = FUNCTIONS,
-        function_call= "auto"
+        functions     = FUNCTIONS,
+        function_call = "auto"
     )
 
-import logging
-logging.basicConfig(level=logging.INFO)
+    # 2) Generator that yields each chunk
+    def gen():
+        for chunk in stream:                         # sync loop
+            logging.info("RAW CHUNK → %s", chunk)    # diagnostics
 
-def gen():
-    for chunk in stream:           # sync iterator
-        logging.info("RAW CHUNK → %s", chunk)   # 👈 log every piece
+            choice = chunk.choices[0]
 
-        choice = chunk.choices[0]
-
-        if choice.delta and choice.delta.get("function_call"):
-            fc = choice.delta.function_call
-            if fc.name and fc.arguments:
-                args   = json.loads(fc.arguments)
-                result = FUNC_TABLE[fc.name](**args)
-                logging.info("FUNCTION %s → %s", fc.name, result)
-                yield json.dumps({"function_result": result}) + "\n"
-
-        elif choice.delta and choice.delta.get("content") is not None:
-            yield json.dumps({"content": choice.delta.content}) + "\n"
-
-            
+            # Function tool call
             if choice.delta and choice.delta.get("function_call"):
                 fc = choice.delta.function_call
                 if fc.name and fc.arguments:
@@ -231,8 +225,9 @@ def gen():
                     result = FUNC_TABLE[fc.name](**args)
                     yield json.dumps({"function_result": result}) + "\n"
 
-            
+            # Normal content token
             elif choice.delta and choice.delta.get("content") is not None:
                 yield json.dumps({"content": choice.delta.content}) + "\n"
 
+    # 3) Wrap in StreamingResponse  (prevents 'null')
     return StreamingResponse(gen(), media_type="application/json")
