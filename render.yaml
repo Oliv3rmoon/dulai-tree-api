@@ -1,9 +1,14 @@
 services:
-  # A Docker web service
   - type: web
-    name: fastapi-example
-    runtime: python
-    plan: free
-    autoDeploy: false
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    name: dulai-tree-api
+    env: python
+    plan: free          # upgrade later if traffic > 100 req/day
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"
+    autoDeploy: true
+    region: oregon
+envVarGroups:
+  - name: dulai-tree-env
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false      # add value in dashboard
