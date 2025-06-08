@@ -203,9 +203,9 @@ class ChatBody(BaseModel):
 
 
 from fastapi.responses import StreamingResponse
-import logging, json, openai       # openai & json are already imported elsewhere
+import logging, json, openai    # openai & json are already imported elsewhere
 
-logging.basicConfig(level=logging.INFO)          # ← keep while debugging
+logging.basicConfig(level=logging.INFO)         # ← keep while debugging
 
 @app.get("/")
 def root():
@@ -213,7 +213,7 @@ def root():
 
 @app.post("/chat")
 async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
-    sid, memory = get_session(dulai_sid)          # ← session memory dict
+    sid, memory = get_session(dulai_sid)        # ← session memory dict
     
 
     """
@@ -222,37 +222,31 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
        {"content": "..."}              ← normal assistant text
        {"function_result": {…}}        ← after a tool call
     """
-messages = [
-    {"role": "system", "content": SYSTEM_PROMPT},
-    {"role": "system", "content": f"KNOWN_FIELDS_JSON = {json.dumps(memory)}"},
-    {"role": "user",   "content": body.message}
-]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"KNOWN_FIELDS_JSON = {json.dumps(memory)}"},
+        {"role": "user",   "content": body.message}
+    ]
 
     # 1️⃣  start the streamed completion  (SYNC iterator!)
     stream = openai.chat.completions.create(
         model         = "gpt-4o",
         temperature   = 0.4,
         stream        = True,
-        messages      = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": body.message}
-        ],
+        messages      = messages,
         functions     = FUNCTIONS,
         function_call = "auto"
     )
 
     # 2️⃣  generator that converts each chunk to a JSON line
     def gen():
-        buf, current_name = "", None         # buffer for tool-call args
+        buf, current_name = "", None
 
-        for chunk in stream:                 #  ← SYNC for-loop
-            logging.info("RAW → %s", chunk)  # shows up in Render logs
-            memory.update(args)         #  store slot(s) so GPT won’t ask again
-yield json.dumps({"function_result": result}) + "\n"
+        for chunk in stream:
+            logging.info("RAW → %s", chunk)
             choice = chunk.choices[0]
             delta  = choice.delta
 
-            # -------- tool / function call ----------
             if getattr(delta, "function_call", None):
                 fc = delta.function_call
                 current_name = fc.name or current_name
@@ -260,21 +254,21 @@ yield json.dumps({"function_result": result}) + "\n"
 
                 if choice.finish_reason == "function_call":
                     try:
-                        args   = json.loads(buf or "{}")
+                        args = json.loads(buf or "{}")
+                        memory.update(args)                         # remember
                         result = FUNC_TABLE[current_name](**args)
                         yield json.dumps({"function_result": result}) + "\n"
                     except Exception as e:
                         logging.exception("tool call error")
                         yield json.dumps({"error": str(e)}) + "\n"
                     buf, current_name = "", None
-                continue                     # skip normal text for this chunk
+                continue
 
             # -------- normal assistant token ----------
             if getattr(delta, "content", None) is not None:
                 yield json.dumps({"content": delta.content}) + "\n"
 
-    # 3️⃣  send the stream
+    # ---- stream back to browser, set cookie --------------------
     resp = StreamingResponse(gen(), media_type="application/json")
-resp.set_cookie("dulai_sid", sid, max_age=60*60*24*7, path="/")
-return resp
-
+    resp.set_cookie("dulai_sid", sid, max_age=60*60*24*7, path="/")
+    return resp
