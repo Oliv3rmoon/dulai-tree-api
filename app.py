@@ -186,3 +186,4 @@ class ChatBody(BaseModel):
 async def chat(body: ChatBody):
     """
     Expects: {"message": "<user text>"}
+    """
