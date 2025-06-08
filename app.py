@@ -189,6 +189,10 @@ import logging, json, openai       # openai & json are already imported elsewher
 
 logging.basicConfig(level=logging.INFO)          # ← keep while debugging
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Dulai Tree API is running"}
+
 @app.post("/chat")
 async def chat(body: ChatBody):
     """
