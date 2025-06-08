@@ -13,11 +13,15 @@ from fastapi import Cookie
 import uuid, json
 _sessions: dict[str, dict] = {}   # {session_id: {field: value}}
 
-def get_session(session_id: str | None) -> tuple[str, dict]:
+def get_session(session_id: str | None) -> tuple[str, dict, list]:
     if not session_id or session_id not in _sessions:
-        session_id = uuid.uuid4().hex     # new visitor
-        _sessions[session_id] = {}
-    return session_id, _sessions[session_id]
+        session_id = uuid.uuid4().hex
+        _sessions[session_id] = {
+            "fields": {},
+            "history": []
+        }
+    session = _sessions[session_id]
+    return session_id, session["fields"], session["history"]
 
 # -----------------------------------------------------------------
 # ENV / CONFIG
@@ -213,8 +217,10 @@ def root():
 
 @app.post("/chat")
 async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
-    sid, memory = get_session(dulai_sid)        # ← session memory dict
-    
+    sid, fields, history = get_session(dulai_sid)   # ← fields here
+
+    history.append({"role":"user","content":body.message})
+
 
     """
     Request JSON:  {"message": "<user text>"}
@@ -225,8 +231,7 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"KNOWN_FIELDS_JSON = {json.dumps(memory)}"},
-        {"role": "user",   "content": body.message}
-    ]
+    ] + history[-12:]         # send last 12 turns max
 
     # 1️⃣  start the streamed completion  (SYNC iterator!)
     stream = openai.chat.completions.create(
@@ -246,13 +251,16 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
             logging.info("RAW → %s", chunk)
             choice = chunk.choices[0]
             delta  = choice.delta
-
+            history.append({"role": "assistant", "content": assistant_buf})
             if getattr(delta, "function_call", None):
                 fc = delta.function_call
                 current_name = fc.name or current_name
                 buf += fc.arguments or ""
 
                 if choice.finish_reason == "function_call":
+                    args = json.loads(buf or "{}")
+                    fields.update(args)
+                    result = FUNC_TABLE[name](**args)
                     try:
                         args = json.loads(buf or "{}")
                         memory.update(args)                         # remember
@@ -263,12 +271,11 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
                         yield json.dumps({"error": str(e)}) + "\n"
                     buf, current_name = "", None
                 continue
+                if delta.content is not None:
+                    assistant_buf += delta.content
+                    yield json.dumps({"content": delta.content}) + "\n"
+            history.append({"role":"assistant","content":assistant_buf})
 
-            # -------- normal assistant token ----------
-            if getattr(delta, "content", None) is not None:
-                yield json.dumps({"content": delta.content}) + "\n"
-
-    # ---- stream back to browser, set cookie --------------------
     resp = StreamingResponse(gen(), media_type="application/json")
     resp.set_cookie("dulai_sid", sid, max_age=60*60*24*7, path="/")
     return resp
