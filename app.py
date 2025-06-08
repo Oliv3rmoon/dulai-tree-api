@@ -168,20 +168,26 @@ def book_job(slot_id: str, job_payload: dict) -> dict:
 # -----------------------------------------------------------------
 # OpenAI function schema (matches FastAPI helpers)
 # -----------------------------------------------------------------
+# ---------------------------------------------------------------
+# 1)  FUNCTION SCHEMAS  (extract_fields needs to be here!)
+# ---------------------------------------------------------------
 FUNCTIONS = [
     {
-        "name": "get_estimate",
-        "description": "Return a rough dollar estimate for the service.",
+        "name": "extract_fields",
+        "description": "Pull any booking slots the user just mentioned.",
         "parameters": {
             "type": "object",
             "properties": {
-                "service_type": {"type": "string"},
-                "tree_count":   {"type": "integer"},
-                "height_ft":    {"type": "integer"},
-                "emergency":    {"type": "boolean"},
-                "zip":          {"type": "string"}
+                "service_type":           {"type": "string"},
+                "tree_count":             {"type": "integer"},
+                "height_ft":              {"type": "integer"},
+                "location_notes":         {"type": "string"},
+                "address":                {"type": "string"},
+                "contact":                {"type": "object"},
+                "preferred_date_range":   {"type": "object"},
+                "preferred_times_of_day": {"type": "array","items":{"type":"string"}}
             },
-            "required": ["service_type","tree_count","height_ft","emergency","zip"]
+            "required": []          # send any subset you found
         }
     },
     {
@@ -200,12 +206,12 @@ FUNCTIONS = [
                 },
                 "preferred_times_of_day": {
                     "type": "array",
-                    "items": {"type": "string"}
+                    "items": {"type":"string"}
                 },
-                "crew_size": {"type": "integer"},
-                "max_slots": {"type": "integer"}
+                "crew_size": {"type":"integer"},
+                "max_slots": {"type":"integer"}
             },
-            "required": ["preferred_date_range", "preferred_times_of_day"]
+            "required": ["preferred_date_range","preferred_times_of_day"]
         }
     },
     {
@@ -222,17 +228,16 @@ FUNCTIONS = [
     }
 ]
 
-# Map function names → actual Python callables
+# ---------------------------------------------------------------
+# 2)  FUNCTION TABLE
+# ---------------------------------------------------------------
 FUNC_TABLE = {
-    "get_estimate":   get_estimate,
-    "find_open_slots":find_open_slots,
-    "book_job":       book_job
+    "extract_fields":  lambda **kw: kw,   # just echo args back
+    "get_estimate":    get_estimate,
+    "find_open_slots": find_open_slots,
+    "book_job":        book_job,
 }
-FUNC_TABLE["extract_fields"] = lambda **kw: kw   # echo the args right back
 
-# -----------------------------------------------------------------
-# Chat endpoint
-# -----------------------------------------------------------------
 class ChatBody(BaseModel):
     message: str
 
@@ -275,40 +280,49 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
     )
 
     # 2️⃣  generator that converts each chunk to a JSON line
-    def gen():
-        buf, current_name = "", None
+def gen():
+    buf, current_name = "", None          # buffer for tool-call args
+    assistant_buf     = ""                # plain-text buffer
+    history.append({"role": "user", "content": body.message})
 
-        for chunk in stream:
-            logging.info("RAW → %s", chunk)
-            choice = chunk.choices[0]
-            delta  = choice.delta
-            history.append({"role": "assistant", "content": assistant_buf})
-            if getattr(delta, "function_call", None):
-                fc = delta.function_call
-                current_name = fc.name or current_name
-                buf += fc.arguments or ""
+    for chunk in stream:                  # ← SYNC iterator from openai
+        logging.info("RAW → %s", chunk)
 
-                if choice.finish_reason == "function_call":
+        choice = chunk.choices[0]
+        delta  = choice.delta
+        if getattr(delta, "function_call", None):
+            fc = delta.function_call
+            current_name = fc.name or current_name
+            buf += fc.arguments or ""
+
+            # tool call finished – we have full JSON args
+            if choice.finish_reason == "function_call":
+                try:
                     args = json.loads(buf or "{}")
-                if current_name == "extract_fields":
-                    fields.update(args)
-                    buf, current_name = "", None
-                    result = FUNC_TABLE[name](**args)
-                    try:
-                        args = json.loads(buf or "{}")
-                        memory.update(args)                         # remember
-                        result = FUNC_TABLE[current_name](**args)
-                        yield json.dumps({"function_result": result}) + "\n"
-                    except Exception as e:
-                        logging.exception("tool call error")
-                        yield json.dumps({"error": str(e)}) + "\n"
-                    buf, current_name = "", None
-                continue
-                if delta.content is not None:
-                    assistant_buf += delta.content
-                    yield json.dumps({"content": delta.content}) + "\n"
-            history.append({"role":"assistant","content":assistant_buf})
 
+                    # special case: extract_fields just updates session memory
+                    if current_name == "extract_fields":
+                        fields.update(args)
+                        result = args                 # echo back
+                    else:
+                        result = FUNC_TABLE[current_name](**args)
+
+                    yield json.dumps({"function_result": result}) + "\n"
+
+                except Exception as e:
+                    logging.exception("tool call error")
+                    yield json.dumps({"error": str(e)}) + "\n"
+
+                buf, current_name = "", None
+            continue                                # skip normal text pieces
+
+        # ── normal assistant content token ────────────────────────────────────
+        if getattr(delta, "content", None) is not None:
+            assistant_buf += delta.content
+            yield json.dumps({"content": delta.content}) + "\n"
+
+    # end-of-stream: store whole assistant reply in session history (optional)
+    history.append({"role": "assistant", "content": assistant_buf})
     resp = StreamingResponse(gen(), media_type="application/json")
     resp.set_cookie("dulai_sid", sid, max_age=60*60*24*7, path="/")
     return resp
