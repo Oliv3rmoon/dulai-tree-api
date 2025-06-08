@@ -134,6 +134,36 @@ def book_job(slot_id: str, job_payload: dict) -> dict:
         "start" : f"{hour:02d}:00",
         "end"   : f"{hour+2:02d}:00"
     }
+    {
+        "name": "extract_fields",
+        "description": "Pull any of the eight booking slots from free-form text.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "service_type":           {"type":"string"},
+                "tree_count":             {"type":"integer"},
+                "height_ft":              {"type":"integer"},
+                "location_notes":         {"type":"string"},
+                "address":                {"type":"string"},
+                "contact": {
+                    "type":"object",
+                    "properties": {
+                        "name":  {"type":"string"},
+                        "phone": {"type":"string"},
+                        "email": {"type":"string"}
+                    }
+                },
+                "preferred_date_range": {
+                    "type":"object",
+                    "properties": {
+                        "start_date":{"type":"string"},
+                        "end_date":  {"type":"string"}
+                    }
+                },
+                "preferred_times_of_day": {"type":"string"}
+            }
+        }
+    },
 
 # -----------------------------------------------------------------
 # OpenAI function schema (matches FastAPI helpers)
@@ -198,6 +228,7 @@ FUNC_TABLE = {
     "find_open_slots":find_open_slots,
     "book_job":       book_job
 }
+FUNC_TABLE["extract_fields"] = lambda **kw: kw   # echo the args right back
 
 # -----------------------------------------------------------------
 # Chat endpoint
@@ -259,7 +290,11 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
 
                 if choice.finish_reason == "function_call":
                     args = json.loads(buf or "{}")
+                if current_name == "extract_fields":
                     fields.update(args)
+                    buf, current_name = "", None
+                    continue 
+                    
                     result = FUNC_TABLE[name](**args)
                     try:
                         args = json.loads(buf or "{}")
