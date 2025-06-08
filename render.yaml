@@ -5,6 +5,7 @@ services:
     plan: free          # upgrade later if traffic > 100 req/day
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /chat   
     autoDeploy: true
     region: oregon
 envVarGroups:
