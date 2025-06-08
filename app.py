@@ -293,7 +293,6 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
                 if current_name == "extract_fields":
                     fields.update(args)
                     buf, current_name = "", None
-                    continue 
                     
                     result = FUNC_TABLE[name](**args)
                     try:
