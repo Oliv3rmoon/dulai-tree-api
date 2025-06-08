@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
+import logging, json, openai                    
 # -----------------------------------------------------------------
 # ENV / CONFIG
 # -----------------------------------------------------------------
@@ -190,44 +191,43 @@ logging.basicConfig(level=logging.INFO)          # ← keep while debugging
 
 @app.post("/chat")
 async def chat(body: ChatBody):
-    """
-    Request:  {"message": "<user text>"}
-    Response: streaming JSON Lines:
-        {"content": "..."}            normal tokens
-        {"function_result": {...}}    after a tool call
-    """
-
-    # 1) OpenAI streaming completion  (SYNC iterator)
     stream = openai.chat.completions.create(
-        model         = "gpt-4o",
-        temperature   = 0.4,
-        stream        = True,
-        messages      = [
+        model="gpt-4o", temperature=0.4, stream=True,
+        messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": body.message}
         ],
-        functions     = FUNCTIONS,
-        function_call = "auto"
+        functions=FUNCTIONS, function_call="auto"
     )
 
-    # 2) Generator that yields each chunk
     def gen():
-        for chunk in stream:                         # sync loop
-            logging.info("RAW CHUNK → %s", chunk)    # diagnostics
+        partial_args = ""      # buffer for streaming JSON string
+        current_name = None
+
+        for chunk in stream:                       # SYNC iterator!
+            logging.info("RAW → %s", chunk)        # DEBUG
 
             choice = chunk.choices[0]
 
-            # Function tool call
-            if choice.delta and choice.delta.get("function_call"):
-                fc = choice.delta.function_call
-                if fc.name and fc.arguments:
-                    args   = json.loads(fc.arguments)
-                    result = FUNC_TABLE[fc.name](**args)
-                    yield json.dumps({"function_result": result}) + "\n"
+            # 1️⃣ function-call chunks
+            if fc := choice.delta.get("function_call"):
+                current_name = fc.name or current_name
+                partial_args += fc.arguments or ""
 
-            # Normal content token
-            elif choice.delta and choice.delta.get("content") is not None:
-                yield json.dumps({"content": choice.delta.content}) + "\n"
+                # last chunk of this tool call?
+                if choice.finish_reason == "function_call":
+                    try:
+                        args = json.loads(partial_args or "{}")
+                        result = FUNC_TABLE[current_name](**args)
+                        yield json.dumps({"function_result": result}) + "\n"
+                    except Exception as e:
+                        yield json.dumps({"error": str(e)}) + "\n"
+                    # reset for next call
+                    partial_args, current_name = "", None
+                continue
 
-    # 3) Wrap in StreamingResponse  (prevents 'null')
+            # 2️⃣ normal assistant tokens
+            if (text := choice.delta.get("content")) is not None:
+                yield json.dumps({"content": text}) + "\n"
+
     return StreamingResponse(gen(), media_type="application/json")
