@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
+from fastapi.responses import StreamingResponse
 # -----------------------------------------------------------------
 # ENV / CONFIG
 # -----------------------------------------------------------------
@@ -182,29 +182,40 @@ FUNC_TABLE = {
 class ChatBody(BaseModel):
     message: str
 
+
 @app.post("/chat")
 async def chat(body: ChatBody):
+    """
+    Expects a JSON body: {"message": "<user text>"}
+    Returns a streaming JSON Lines response:
+      {"content": "..."} or {"function_result": {...}}
+    """
+
     stream = openai.chat.completions.create(
-        model       = "gpt-4o",
-        temperature = 0.4,
-        stream      = True,
-        messages    = [
-            {"role":"system","content": SYSTEM_PROMPT},
-            {"role":"user","content": body.message}
+        model        = "gpt-4o",
+        temperature  = 0.4,
+        stream       = True,
+        messages     = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": body.message}
         ],
-        functions   = FUNCTIONS,
-        function_call = "auto"
+        functions    = FUNCTIONS,
+        function_call= "auto"
     )
 
     def gen():
-        for chunk in stream:                # <- synchronous iterator
+        for chunk in stream:                         
             choice = chunk.choices[0]
+
+            
             if choice.delta and choice.delta.get("function_call"):
                 fc = choice.delta.function_call
                 if fc.name and fc.arguments:
-                    args    = json.loads(fc.arguments)
-                    result  = FUNC_TABLE[fc.name](**args)
+                    args   = json.loads(fc.arguments)
+                    result = FUNC_TABLE[fc.name](**args)
                     yield json.dumps({"function_result": result}) + "\n"
+
+            
             elif choice.delta and choice.delta.get("content") is not None:
                 yield json.dumps({"content": choice.delta.content}) + "\n"
 
