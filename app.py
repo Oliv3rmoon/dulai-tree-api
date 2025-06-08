@@ -191,43 +191,56 @@ logging.basicConfig(level=logging.INFO)          # ← keep while debugging
 
 @app.post("/chat")
 async def chat(body: ChatBody):
+    """
+    Request JSON:  {"message": "<user text>"}
+    Response:      ND-JSON stream, one object per line
+       {"content": "..."}              ← normal assistant text
+       {"function_result": {…}}        ← after a tool call
+    """
+
+    # 1️⃣  start the streamed completion  (SYNC iterator!)
     stream = openai.chat.completions.create(
-        model="gpt-4o", temperature=0.4, stream=True,
-        messages=[
+        model         = "gpt-4o",
+        temperature   = 0.4,
+        stream        = True,
+        messages      = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": body.message}
         ],
-        functions=FUNCTIONS, function_call="auto"
+        functions     = FUNCTIONS,
+        function_call = "auto"
     )
 
+    # 2️⃣  generator that converts each chunk to a JSON line
     def gen():
-        partial_args = ""      # buffer for streaming JSON string
-        current_name = None
+        buf, current_name = "", None         # buffer for tool-call args
 
-        for chunk in stream:                       # SYNC iterator!
-            logging.info("RAW → %s", chunk)        # DEBUG
+        for chunk in stream:                 #  ← SYNC for-loop
+            logging.info("RAW → %s", chunk)  # shows up in Render logs
 
             choice = chunk.choices[0]
+            delta  = choice.delta
 
-            # 1️⃣ function-call chunks
-            if fc := choice.delta.get("function_call"):
+            # -------- tool / function call ----------
+            if getattr(delta, "function_call", None):
+                fc = delta.function_call
                 current_name = fc.name or current_name
-                partial_args += fc.arguments or ""
+                buf += fc.arguments or ""
 
-                # last chunk of this tool call?
                 if choice.finish_reason == "function_call":
                     try:
-                        args = json.loads(partial_args or "{}")
+                        args   = json.loads(buf or "{}")
                         result = FUNC_TABLE[current_name](**args)
                         yield json.dumps({"function_result": result}) + "\n"
                     except Exception as e:
+                        logging.exception("tool call error")
                         yield json.dumps({"error": str(e)}) + "\n"
-                    # reset for next call
-                    partial_args, current_name = "", None
-                continue
+                    buf, current_name = "", None
+                continue                     # skip normal text for this chunk
 
-            # 2️⃣ normal assistant tokens
-            if (text := choice.delta.get("content")) is not None:
-                yield json.dumps({"content": text}) + "\n"
+            # -------- normal assistant token ----------
+            if getattr(delta, "content", None) is not None:
+                yield json.dumps({"content": delta.content}) + "\n"
 
+    # 3️⃣  send the stream
     return StreamingResponse(gen(), media_type="application/json")
