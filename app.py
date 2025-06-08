@@ -8,7 +8,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
-import logging, json, openai                    
+import logging, json, openai
+from fastapi import Cookie
+_sessions: dict[str, dict] = {}   # {session_id: {field: value}}
+
+def get_session(session_id: str | None) -> tuple[str, dict]:
+    if not session_id or session_id not in _sessions:
+        session_id = uuid.uuid4().hex     # new visitor
+        _sessions[session_id] = {}
+    return session_id, _sessions[session_id]
+
 # -----------------------------------------------------------------
 # ENV / CONFIG
 # -----------------------------------------------------------------
