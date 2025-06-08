@@ -203,7 +203,9 @@ def root():
     return {"status": "ok", "message": "Dulai Tree API is running"}
 
 @app.post("/chat")
-async def chat(body: ChatBody):
+async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
+    sid, memory = get_session(dulai_sid)
+
     """
     Request JSON:  {"message": "<user text>"}
     Response:      ND-JSON stream, one object per line
