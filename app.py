@@ -203,9 +203,25 @@ async def chat(body: ChatBody):
         function_call= "auto"
     )
 
-    def gen():
-        for chunk in stream:                         
-            choice = chunk.choices[0]
+import logging
+logging.basicConfig(level=logging.INFO)
+
+def gen():
+    for chunk in stream:           # sync iterator
+        logging.info("RAW CHUNK → %s", chunk)   # 👈 log every piece
+
+        choice = chunk.choices[0]
+
+        if choice.delta and choice.delta.get("function_call"):
+            fc = choice.delta.function_call
+            if fc.name and fc.arguments:
+                args   = json.loads(fc.arguments)
+                result = FUNC_TABLE[fc.name](**args)
+                logging.info("FUNCTION %s → %s", fc.name, result)
+                yield json.dumps({"function_result": result}) + "\n"
+
+        elif choice.delta and choice.delta.get("content") is not None:
+            yield json.dumps({"content": choice.delta.content}) + "\n"
 
             
             if choice.delta and choice.delta.get("function_call"):
