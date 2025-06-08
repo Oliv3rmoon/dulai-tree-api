@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 import logging, json, openai
 from fastapi import Cookie
+import uuid, json
 _sessions: dict[str, dict] = {}   # {session_id: {field: value}}
 
 def get_session(session_id: str | None) -> tuple[str, dict]:
@@ -56,6 +57,14 @@ def is_free(date: dt.date, hour: int) -> bool:
 def reserve(date: dt.date, hour: int, payload: dict) -> str:
     _calendar.setdefault(date.isoformat(), {})[hour] = payload
     return _slot_key(date, hour)
+# ---- very small in-memory session store ----
+_sessions: dict[str, dict] = {}   # {session_id: {slot_name: value}}
+
+def get_session(session_id: str | None) -> tuple[str, dict]:
+    if not session_id or session_id not in _sessions:
+        session_id = uuid.uuid4().hex
+        _sessions[session_id] = {}
+    return session_id, _sessions[session_id]
 
 # -----------------------------------------------------------------
 # Booking helpers exposed to the model
@@ -204,7 +213,8 @@ def root():
 
 @app.post("/chat")
 async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
-    sid, memory = get_session(dulai_sid)
+    sid, memory = get_session(dulai_sid)          # ← session memory dict
+    
 
     """
     Request JSON:  {"message": "<user text>"}
@@ -212,6 +222,11 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
        {"content": "..."}              ← normal assistant text
        {"function_result": {…}}        ← after a tool call
     """
+messages = [
+    {"role": "system", "content": SYSTEM_PROMPT},
+    {"role": "system", "content": f"KNOWN_FIELDS_JSON = {json.dumps(memory)}"},
+    {"role": "user",   "content": body.message}
+]
 
     # 1️⃣  start the streamed completion  (SYNC iterator!)
     stream = openai.chat.completions.create(
@@ -232,7 +247,8 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
 
         for chunk in stream:                 #  ← SYNC for-loop
             logging.info("RAW → %s", chunk)  # shows up in Render logs
-
+            memory.update(args)         #  store slot(s) so GPT won’t ask again
+yield json.dumps({"function_result": result}) + "\n"
             choice = chunk.choices[0]
             delta  = choice.delta
 
@@ -258,4 +274,7 @@ async def chat(body: ChatBody, dulai_sid: str | None = Cookie(None)):
                 yield json.dumps({"content": delta.content}) + "\n"
 
     # 3️⃣  send the stream
-    return StreamingResponse(gen(), media_type="application/json")
+    resp = StreamingResponse(gen(), media_type="application/json")
+resp.set_cookie("dulai_sid", sid, max_age=60*60*24*7, path="/")
+return resp
+
